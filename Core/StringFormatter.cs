@@ -1,9 +1,13 @@
+using System;
+using System.Collections.Concurrent;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
 
 public class StringFormatter : IStringFormatter
 {
     public static readonly StringFormatter Shared = new StringFormatter();
+    private ConcurrentDictionary<string, Func<object, string>> _cache = new();
 
     public string Format(string template, object target)
     {
@@ -11,11 +15,6 @@ public class StringFormatter : IStringFormatter
         {
             throw new InvalidTemplateException(template);
         }
-
-        Type objClass = target.GetType();
-        FieldInfo fld;
-        PropertyInfo prp;
-
         var result = new StringBuilder();
         var strLen = template.Length;
         var stop = false;
@@ -40,32 +39,64 @@ public class StringFormatter : IStringFormatter
                     startOpen += 2;
                 }
                 else
-                {                    
-                    result.Append(template.Substring(anchor,openPos - anchor));
-                    closePos = template.IndexOf('}', openPos);                    
+                {
+                    result.Append(template.Substring(anchor, openPos - anchor));
+
+                    closePos = template.IndexOf('}', openPos);
                     startOpen = closePos;
                     anchor = closePos + 1;
-                    fieldName = template.Substring(openPos + 1, closePos - openPos - 1);
 
-                    prp = objClass.GetProperty(fieldName);                              
-                    if (prp != null){
-                        result.Append(prp.GetValue(target).ToString()); 
-                        continue;
+                    fieldName = template.Substring(openPos + 1, closePos - openPos - 1);
+                    var fieldStr = GetTargetStringProperty(fieldName, target);
+
+                    if (fieldStr != null)
+                    {
+                        result.Append(fieldStr);
                     }
-                    fld = objClass.GetField(fieldName);                              
-                    if (fld != null){
-                        result.Append(fld.GetValue(target).ToString()); 
-                        continue;
+                    else
+                    {
+                        throw new InvalidFieldNameException(fieldName);
                     }
-                    throw new InvalidFieldNameException(fieldName);
                 }
             }
         }
-        return result.ToString();
-    }
 
+        // escaping characters
+        stop = false;
+        startOpen = 0;
+        while (!stop)
+        {
+            openPos = result.ToString().IndexOf('{', startOpen);
+            if (openPos != -1)
+            {
+                result.Remove(openPos, 1);
+                startOpen = openPos + 1;
+            }
+            else
+            {
+                stop = true;
+            }
+        }
+
+        stop = false;
+        var startClose = 0;
+        while (!stop)
+        {
+            closePos = result.ToString().IndexOf('}', startClose);
+            if (closePos != -1)
+            {
+                result.Remove(closePos, 1);
+                startClose = closePos + 1;
+            }
+            else
+            {
+                stop = true;
+            }
+        }
+        return result.ToString();
+    }    
     private bool CheckString(string template)
-    {
+    {        
         var x = 0;
         foreach (var ch in template)
         {
@@ -82,6 +113,42 @@ public class StringFormatter : IStringFormatter
                 return false;
             }
         }
-        return true;
+        if (x == 0)
+            return true;
+        else
+            return false;
+    }
+
+    private string? GetTargetStringProperty(string input, object target)
+    {
+        string propertyAccessorStr = target.GetType().ToString() + "." + input;
+
+        if (!_cache.ContainsKey(propertyAccessorStr))
+        {
+            try
+            {
+                var param = Expression.Parameter(typeof(object), "target");
+
+                var curObjParam = Expression.PropertyOrField(Expression.TypeAs(param, target.GetType()), input);
+
+                var b = Expression.Call(curObjParam, "ToString", null, null);
+
+                var lambda = Expression.Lambda<Func<object, string>>(b, new[] { param });
+
+                var func = lambda.Compile();
+
+                _cache.TryAdd(propertyAccessorStr, func);
+
+                return func(target);
+
+            }
+            catch
+            {
+
+                return null;
+            }
+            
+        }
+       return _cache[propertyAccessorStr](target);
     }
 }
