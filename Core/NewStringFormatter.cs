@@ -1,13 +1,14 @@
+﻿using Core;
 using System;
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
 
-public class StringFormatter : IStringFormatter
+public class NewStringFormatter : IStringFormatter
 {
-    public static readonly StringFormatter Shared = new StringFormatter();
-    private ConcurrentDictionary<string, Func<object, string>> _cache = new();
+    public static readonly NewStringFormatter Shared = new NewStringFormatter();
+    private ConcurrentDictionary<string, Func<object, object>> _cache = new();
 
     public string Format(string template, object target)
     {
@@ -51,19 +52,22 @@ public class StringFormatter : IStringFormatter
                     fieldName = fieldName.Trim();
 
                     var tuple = getPropertyNameAndIndexes(fieldName);
-                    string? fieldStr;
-                    if (tuple != null)
-                    {
-                        fieldStr = GetTargetStringPropertyByIndex(tuple.Item1,tuple.Item2, target);
-                    }
-                    else
-                    {
-                        fieldStr = GetTargetStringProperty(fieldName, target);
-                    }
 
-                    if (fieldStr != null)
+                    var propertyName = tuple.Item1;
+                    var indexes = tuple.Item2;
+
+                    var property = GetTargetProperty(propertyName, target);
+                 
+                    if (property != null)
                     {
-                        result.Append(fieldStr);
+                        if (indexes.Count != 0)
+                        {
+                            result.Append(GetObjectByIndex(property, indexes).ToString());
+                        }
+                        else
+                        {
+                            result.Append(property.ToString());
+                        }                        
                     }
                     else
                     {
@@ -109,21 +113,21 @@ public class StringFormatter : IStringFormatter
         return result.ToString();
     }
 
-    private Tuple<string, List<string>>? getPropertyNameAndIndexes(string template)
+    private Tuple<string, List<string>?>? getPropertyNameAndIndexes(string template)
     {
-        var propertyName = "";
-        var indexes = new List<string>();        
+        string propertyName;
+        var indexes = new List<string>();
 
         // get property name 
         var openPos = template.IndexOf('[', 0);
-        
+
         if (openPos != -1)
         {
             propertyName = template.Substring(0, openPos);
         }
         else
-        {            
-            return null;
+        {
+            return Tuple.Create(template, indexes);
         }
 
         var closePos = template.IndexOf(']', openPos);
@@ -175,8 +179,8 @@ public class StringFormatter : IStringFormatter
 
 
     private bool CheckString(string template)
-    {        
-        var x = 0;        
+    {
+        var x = 0;
         foreach (var ch in template)
         {
             if (ch == '{')
@@ -198,41 +202,90 @@ public class StringFormatter : IStringFormatter
             return false;
     }
 
-    private string? GetTargetStringPropertyByIndex(string propertyName, List<string> indexes, object target)
+    private object? GetObjectByIndex(object container, List<string> indexes)
     {
-        // string propertyAccessorStr = target.GetType().ToString() + "." + input;
+        var strIndexes = indexes;
 
-        // if (!_cache.ContainsKey(propertyAccessorStr))
-        // {
-        //     try
-        //     {
-        //         var param = Expression.Parameter(typeof(object), "target");
+        object currList = container;
 
-        //         var curObjParam = Expression.PropertyOrField(Expression.TypeAs(param, target.GetType()), input);
+        // create listType to make conversion (listType)Array later...
+        // IList interfase is implemented by all array - like structures
+        // IList contains Index property, used to access values by indexes
+        Type listType;
 
-        //         var b = Expression.Call(curObjParam, "ToString", null, null);
+        foreach (var strIndex in strIndexes)
+        {
+            // create listType to make conversion (listType)Array later...
+            // IList interfase is implemented by all array - like structures
+            // IList contains Index property, used to access values by indexes
+            listType = currList.GetType();
 
-        //         var lambda = Expression.Lambda<Func<object, string>>(b, new[] { param });
+            // objIndex represents index in form of object 
+            // in order to create lambda<<Func<object, object, object>> later
 
-        //         var func = lambda.Compile();
+            object objIndex;
 
-        //         _cache.TryAdd(propertyAccessorStr, func);
+            // indexType to convert indexExpr to desired type
 
-        //         return func(target);
+            Type indexType;
 
-        //     }
-        //     catch
-        //     {
+            int intIndex;
 
-        //         return null;
-        //     }
+            int.TryParse(strIndex, out intIndex);
 
-        // }
-        //return _cache[propertyAccessorStr](target);
-        return null;
+            // get index type 
+            // create appropriate objIndex
+            if (TypeChecker.IsDictionary(currList))
+            {
+                indexType = listType.GetGenericArguments()[0];
+
+                if (indexType == typeof(string))
+                {
+                    objIndex = strIndex;
+                }
+                else
+                {
+                    objIndex = intIndex;
+                }
+            }
+            else
+            {
+                indexType = typeof(int);
+
+                objIndex = intIndex;
+            }
+
+            var arrayExpr = Expression.Parameter(typeof(object), "Array");
+
+            var indexExpr = Expression.Parameter(typeof(object), "Index");
+
+            // represents accessing to Item propetry
+            // 
+            Expression getValueByIndexExpr;
+
+            if (listType.IsArray)
+            {
+                getValueByIndexExpr = Expression.ArrayAccess(Expression.Convert(arrayExpr, listType), Expression.Convert(indexExpr, indexType));
+            }
+            else
+            {
+                getValueByIndexExpr = Expression.Property(Expression.Convert(arrayExpr, listType), "Item", Expression.Convert(indexExpr, indexType));
+            }
+
+            var lambdaExpr = Expression.Lambda<Func<object, object, object>>(
+             getValueByIndexExpr,
+             new[] { arrayExpr, indexExpr });
+
+            var lambda = lambdaExpr.Compile();
+
+            currList = lambda(currList, objIndex);
+        }
+
+        var result = currList;
+        return result;
     }
 
-    private string? GetTargetStringProperty(string input, object target)
+    private object? GetTargetProperty(string input, object target)
     {
         string propertyAccessorStr = target.GetType().ToString() + "." + input;
 
@@ -244,9 +297,7 @@ public class StringFormatter : IStringFormatter
 
                 var curObjParam = Expression.PropertyOrField(Expression.TypeAs(param, target.GetType()), input);
 
-                var b = Expression.Call(curObjParam, "ToString", null, null);
-
-                var lambda = Expression.Lambda<Func<object, string>>(b, new[] { param });
+                var lambda = Expression.Lambda<Func<object, object>>(curObjParam, new[] { param });
 
                 var func = lambda.Compile();
 
